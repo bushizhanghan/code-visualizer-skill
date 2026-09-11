@@ -1,15 +1,15 @@
 # code-visualizer
 
-写代码 + 代码可视化助手。面向 **Python (.py)** 与 **JS/TS (.js/.jsx/.ts/.tsx)**，把代码结构画成图，让依赖、继承、调用关系一眼可见。
+写代码 + 代码可视化助手。面向 **Python (.py)**、**C (.c/.h)** 与 **JS/TS (.js/.jsx/.ts/.tsx)**，把代码结构画成图，让依赖、继承、调用关系一眼可见。
 
 ## 功能
 
-| 效果 | 命令 |
-|------|------|
-| 整个项目 import / 依赖关系图 | `code_graph.py deps <目录>` |
-| 单文件类图（继承 / 方法 / 属性） | `code_graph.py classes <文件>` |
-| 单文件函数调用链 | `code_graph.py calls <文件>` |
-| 目录 / 文件结构树 | `code_graph.py tree <目录>` |
+| 效果 | 命令 | 支持语言 |
+|------|------|----------|
+| 整个项目依赖关系图 | `code_graph.py deps <目录>` | Python / C / JS-TS |
+| 单文件类图（继承 / 方法 / 属性） | `code_graph.py classes <文件>` | Python / C(struct) / JS-TS |
+| 单文件函数调用链 | `code_graph.py calls <文件>` | Python / C |
+| 目录 / 文件结构树 | `code_graph.py tree <目录>` | 全部 |
 
 - 零依赖：只用 Python 标准库（`ast` / `re`）。
 - 输出 Mermaid 文本，可自行渲染；加 `--html <path>` 直接生成可在浏览器打开的自包含图。
@@ -95,4 +95,6 @@ code-visualizer/
 ## 说明
 
 - `calls` 为单文件内分析；跨文件调用图需整项目级分析，后续可按需扩展。
-- JS/TS 的类图、依赖图为正则解析（尽力而为），Python 为 `ast` 精确解析。
+- JS/TS 与 C 的类图、依赖图为正则解析（尽力而为），Python 为 `ast` 精确解析。
+- C 没有类继承，`classes` 展示 `struct` 的字段，并通过 `*--` 标出 struct 之间的组合关系（如 `struct Node* next`）。
+- C 的依赖图只统计项目内 `#include "..."`（引号）包含，系统头文件 `<...>` 自动忽略。

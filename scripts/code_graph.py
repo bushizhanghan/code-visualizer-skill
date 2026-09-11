@@ -13,7 +13,8 @@ code_graph.py — 解析源码并输出 Mermaid 图表文本（零依赖，仅�
 加 --limit N 限制节点数（默认 60，防止图过大）。
 
 语言支持:
-  .py          全部支持（ast 解析）
+  .py          全部支持（ast 精确解析）
+  .c/.h        依赖图(#include) + struct 图 + 函数调用图（正则解析，尽力而为）
   .js/.jsx/.ts/.tsx  依赖图 + 类图（正则解析，尽力而为）
 """
 import argparse
@@ -28,7 +29,8 @@ IGNORE_DIRS = {
 }
 PY_EXT = ('.py',)
 JS_EXT = ('.js', '.jsx', '.ts', '.tsx')
-ALL_EXT = PY_EXT + JS_EXT
+C_EXT = ('.c', '.h')
+ALL_EXT = PY_EXT + JS_EXT + C_EXT
 
 
 def slug(s):
@@ -118,6 +120,113 @@ def resolve_js_target(imp, path, all_files):
     return None
 
 
+# ---------- C 解析层（正则，尽力而为） ----------
+
+def c_includes(path):
+    try:
+        src = open(path, encoding='utf-8', errors='ignore').read()
+    except Exception:
+        return []
+    return [m.group(1) for m in re.finditer(r'#include\s*"([^"]+)"', src)]
+
+
+def resolve_c_include(inc, path, all_files):
+    d = os.path.dirname(path)
+    cand = os.path.normpath(os.path.join(d, inc))
+    if cand in all_files:
+        return cand
+    base = os.path.basename(inc)
+    for f in all_files:
+        if os.path.basename(f) == base:
+            return f
+    return None
+
+
+def c_structs(path):
+    """返回 (struct列表, 组合边)。struct列表项 = (名称, [], 字段显示串列表)。"""
+    try:
+        src = open(path, encoding='utf-8', errors='ignore').read()
+    except Exception:
+        return [], []
+    raw = []
+    n = len(src)
+    for m in re.finditer(r'(typedef\s+)?struct\s+(\w+)?\s*\{', src):
+        is_typedef = bool(m.group(1))
+        tag = m.group(2)
+        depth = 0
+        j = m.end() - 1  # 指向 '{'
+        start = m.end()
+        while j < n:
+            c = src[j]
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        body = src[start:j]
+        alias = None
+        if is_typedef:
+            ma = re.match(r'\s*(\w+)\s*[;,=]', src[j + 1:])
+            if ma:
+                alias = ma.group(1)
+        sname = alias or tag or ('anon%d' % len(raw))
+        fields = [c.strip() for c in body.split(';')
+                  if c.strip() and not c.strip().startswith('//')]
+        raw.append((sname, fields))
+    names = {r[0] for r in raw}
+    res = []
+    edges = []
+    for sname, fields in raw:
+        res.append((sname, [], [], fields))
+        for f in fields:
+            for nm in names:
+                if nm != sname and re.search(r'\b' + re.escape(nm) + r'\b', f):
+                    edges.append((sname, nm))
+    return res, edges
+
+
+def c_calls(path):
+    try:
+        src = open(path, encoding='utf-8', errors='ignore').read()
+    except Exception:
+        return [], set()
+    KW = {'if', 'for', 'while', 'switch', 'return', 'sizeof', 'do', 'catch',
+          'typeof', 'foreach', 'int', 'char', 'void', 'float', 'double',
+          'long', 'short', 'unsigned', 'signed', 'static', 'const',
+          'struct', 'typedef', 'enum', 'union'}
+    bodies = []
+    defs = set()
+    for m in re.finditer(r'\b([a-zA-Z_]\w*)\s*\(([^;{]*)\)\s*\{', src):
+        name = m.group(1)
+        if name in KW:
+            continue
+        defs.add(name)
+        depth = 0
+        j = m.end() - 1
+        start = m.end()
+        nn = len(src)
+        while j < nn:
+            c = src[j]
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        bodies.append((name, src[start:j]))
+    edges = []
+    for fn, body in bodies:
+        for other in defs:
+            if other == fn:
+                continue
+            if re.search(r'\b' + re.escape(other) + r'\s*\(', body):
+                edges.append((fn, other))
+    return edges, defs
+
+
 def py_classes(path):
     try:
         tree = ast.parse(open(path, encoding='utf-8').read())
@@ -199,7 +308,8 @@ def cmd_deps(args):
     root = os.path.abspath(args.path)
     py_files = walk_files(root, PY_EXT)
     js_files = walk_files(root, JS_EXT)
-    all_files = set(py_files) | set(js_files)
+    c_files = walk_files(root, C_EXT)
+    all_files = set(py_files) | set(js_files) | set(c_files)
 
     module_map = {}
     for pf in py_files:
@@ -215,9 +325,14 @@ def cmd_deps(args):
                 tgt = module_map.get(mod)
                 if tgt and tgt != f:
                     edges.add((rel_of(f, root), rel_of(tgt, root)))
-        else:
+        elif f.endswith(JS_EXT):
             for imp in js_imports(f):
                 tgt = resolve_js_target(imp, f, all_files)
+                if tgt and tgt != f:
+                    edges.add((rel_of(f, root), rel_of(tgt, root)))
+        else:  # C
+            for inc in c_includes(f):
+                tgt = resolve_c_include(inc, f, all_files)
                 if tgt and tgt != f:
                     edges.add((rel_of(f, root), rel_of(tgt, root)))
 
@@ -236,10 +351,13 @@ def cmd_deps(args):
 
 
 def cmd_classes(args):
+    edges = []
     if args.path.endswith(PY_EXT):
         data = py_classes(args.path)
-    else:
+    elif args.path.endswith(JS_EXT):
         data = js_classes(args.path)
+    else:  # C / 其他：尽力而为解析 struct
+        data, edges = c_structs(args.path)
     lines = ['classDiagram']
     for name, bases, methods, attrs in data:
         lines.append(f'  class {name}')
@@ -249,11 +367,18 @@ def cmd_classes(args):
             lines.append(f'    {name} : -{a}')
         for b in bases:
             lines.append(f'  {b} <|-- {name}')
+    for owner, member in edges:
+        lines.append(f'  {owner} *-- {member}')
     emit('\n'.join(lines), args.html)
 
 
 def cmd_calls(args):
-    edges, tops = py_calls(args.path)
+    if args.path.endswith(PY_EXT):
+        edges, tops = py_calls(args.path)
+    elif args.path.endswith(C_EXT):
+        edges, tops = c_calls(args.path)
+    else:  # JS/TS 暂未实现调用图
+        edges, tops = [], set()
     lines = ['flowchart TD']
     for n in sorted(tops):
         lines.append(f'  {slug(n)}["{n}"]')
